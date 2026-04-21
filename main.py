@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import base64
+import yfinance as yf
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -76,19 +77,16 @@ def get_yahoo_price(pair):
     if not symbol:
         return None
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=5m"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
-        data = r.json()
-        result = data["chart"]["result"][0]
-        closes = result["indicators"]["quote"][0]["closes"]
-        closes = [c for c in closes if c is not None]
-        if len(closes) < 2:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="1d", interval="1m")
+        if hist.empty:
             return None
+        price = round(float(hist["Close"].iloc[-1]), 5)
+        prev_price = round(float(hist["Close"].iloc[-2]), 5)
         return {
-            "price": round(closes[-1], 5),
-            "prev_price": round(closes[-2], 5),
-            "change": round(closes[-1] - closes[-2], 5)
+            "price": price,
+            "prev_price": prev_price,
+            "change": price - prev_price
         }
     except Exception as e:
         print(f"Yahoo error {pair}: {e}", flush=True)
@@ -255,7 +253,7 @@ def check_hourly_bias():
         data = get_yahoo_price(pair)
         if data:
             prices[pair] = data
-        time.sleep(0.5)
+        time.sleep(1)
 
     if not prices:
         return
@@ -291,7 +289,7 @@ def send_morning_brief():
         data = get_yahoo_price(pair)
         if data:
             prices[pair] = data
-        time.sleep(0.5)
+        time.sleep(1)
 
     try:
         r = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=10)
@@ -345,7 +343,7 @@ def check_session_countdown():
                     data = get_yahoo_price(pair)
                     if data:
                         prices[pair] = data
-                    time.sleep(0.5)
+                    time.sleep(1)
                 price_lines = "\n".join([f"💰 <b>{p}</b>: {prices[p]['price']}" for p in prices]) if prices else ""
                 prompt = f"""15 minutes to {label} at {open_time}. Prices: {', '.join([f'{p}: {prices[p]["price"]}' for p in prices])}. 3 lines: expected bias at open, where liquidity sits, one key level to watch for sweep."""
                 ai = ask_claude(prompt)
@@ -362,7 +360,7 @@ def check_correlation_breakdown():
     if not session:
         return
     eur_data = get_yahoo_price("EUR/USD")
-    time.sleep(0.5)
+    time.sleep(1)
     gbp_data = get_yahoo_price("GBP/USD")
     if not eur_data or not gbp_data:
         return
@@ -430,7 +428,7 @@ Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/o
                             d = "📈" if data["change"] > 0 else "📉"
                             change_pips = data["change"] * (100 if "XAU" in pair or "XAG" in pair else 10000)
                             prices_msg += f"{d} <b>{pair}</b>: {data['price']} ({'+' if change_pips > 0 else ''}{change_pips:.1f} pips)\n"
-                        time.sleep(0.5)
+                        time.sleep(1)
                     send_telegram(prices_msg, chat_id)
 
                 elif cmd == "/bias":
@@ -441,7 +439,7 @@ Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/o
                         data = get_yahoo_price(pair)
                         if data:
                             prices[pair] = data
-                        time.sleep(0.5)
+                        time.sleep(1)
                     session = get_session() or "Off hours"
                     price_summary = "\n".join([f"{'📈' if prices[p]['change'] > 0 else '📉'} <b>{p}</b>: {prices[p]['price']}" for p in prices])
                     data_text = " | ".join([f"{p}: {prices[p]['price']} ({'up' if prices[p]['change'] > 0 else 'down'})" for p in prices])
@@ -499,10 +497,10 @@ send_telegram(
     "🤖 AI Analysis: ON\n"
     "📰 News Alerts: ON\n"
     "📊 Hourly Bias: ON\n"
-    "🌅 Morning Brief: 06:30 UTC daily\n"
+    "🌅 Morning Brief: 07:30 BST daily\n"
     "📸 Chart Analysis: Send any image\n"
-    "💰 Prices: Yahoo Finance (real time)\n"
-    "📊 Volume: Twelve Data\n\n"
+    "💰 Prices: Yahoo Finance\n"
+    "📊 Volume Spikes: Twelve Data\n\n"
     "Commands: /prices /bias /brief /help"
 )
 
