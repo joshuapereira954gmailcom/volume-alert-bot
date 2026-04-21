@@ -1,7 +1,9 @@
 import os
 import time
+import threading
 import requests
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -16,8 +18,6 @@ BLACKOUT_WINDOWS = [
     (12, 25, 12, 35),
     (13, 55, 14, 5),
 ]
-
-volume_history = {pair: [] for pair in PAIRS}
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -34,12 +34,10 @@ def is_blackout():
 
 def is_trading_session():
     now = datetime.now(timezone.utc)
-    hour = now.hour
-    return 7 <= hour <= 21
+    return 7 <= now.hour <= 21
 
 def get_volume(pair):
     symbol = pair.replace("/", "")
-    url = f"https://api.twelvedata.com/time_series"
     params = {
         "symbol": symbol,
         "interval": "1min",
@@ -47,15 +45,14 @@ def get_volume(pair):
         "apikey": TWELVE_API_KEY
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get("https://api.twelvedata.com/time_series", params=params, timeout=10)
         data = r.json()
         if "values" not in data:
             return None, None, None
         candles = data["values"]
-        latest = candles[0]
-        latest_vol = float(latest.get("volume", 0))
+        latest_vol = float(candles[0].get("volume", 0))
         avg_vol = sum(float(c.get("volume", 0)) for c in candles[1:21]) / 20
-        price = float(latest["close"])
+        price = float(candles[0]["close"])
         return latest_vol, avg_vol, price
     except:
         return None, None, None
@@ -66,17 +63,12 @@ def check_spikes():
     if is_blackout():
         print("Blackout period — skipping")
         return
-
     for pair in PAIRS:
         latest_vol, avg_vol, price = get_volume(pair)
-        if latest_vol is None:
+        if latest_vol is None or avg_vol == 0:
             continue
-        if avg_vol == 0:
-            continue
-
         ratio = latest_vol / avg_vol
         print(f"{pair} | Vol: {latest_vol:.0f} | Avg: {avg_vol:.0f} | Ratio: {ratio:.2f}x | Price: {price}")
-
         if ratio >= SPIKE_MULTIPLIER:
             msg = (
                 f"🚨 <b>VOLUME SPIKE — {pair}</b>\n\n"
@@ -89,10 +81,21 @@ def check_spikes():
             )
             send_telegram(msg)
             print(f"ALERT SENT: {pair} {ratio:.1f}x spike")
-
         time.sleep(1)
 
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+    def log_message(self, format, *args):
+        pass
+
+def run_server():
+    HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
+
 if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
     send_telegram("✅ Volume Alert Bot is live — watching EUR/USD, GBP/USD, XAU/USD, XAG/USD")
     while True:
         check_spikes()
