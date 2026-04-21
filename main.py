@@ -10,18 +10,36 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 PAIRS = ["EUR/USD", "GBP/USD", "XAU/USD", "XAG/USD"]
-
 SPIKE_MULTIPLIER = 3.0
-
 BLACKOUT_WINDOWS = [
     (8, 25, 8, 35),
     (12, 25, 12, 35),
     (13, 55, 14, 5),
 ]
 
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+    def log_message(self, format, *args):
+        pass
+
+def run_server():
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    print("HTTP server started on port 10000")
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+time.sleep(3)
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"})
+    try:
+        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"})
+        print(f"Telegram response: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 def is_blackout():
     now = datetime.now(timezone.utc)
@@ -54,7 +72,8 @@ def get_volume(pair):
         avg_vol = sum(float(c.get("volume", 0)) for c in candles[1:21]) / 20
         price = float(candles[0]["close"])
         return latest_vol, avg_vol, price
-    except:
+    except Exception as e:
+        print(f"API error: {e}")
         return None, None, None
 
 def check_spikes():
@@ -80,23 +99,10 @@ def check_spikes():
                 f"⚠️ Possible smart money positioning"
             )
             send_telegram(msg)
-            print(f"ALERT SENT: {pair} {ratio:.1f}x spike")
         time.sleep(1)
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-    def log_message(self, format, *args):
-        pass
+send_telegram("✅ Volume Alert Bot is live — watching EUR/USD, GBP/USD, XAU/USD, XAG/USD")
 
-def run_server():
-    HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
-
-if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    send_telegram("✅ Volume Alert Bot is live — watching EUR/USD, GBP/USD, XAU/USD, XAG/USD")
-    while True:
-        check_spikes()
-        time.sleep(60)
+while True:
+    check_spikes()
+    time.sleep(60)
