@@ -4,7 +4,7 @@ import threading
 import requests
 import base64
 import yfinance as yf
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "").strip()
@@ -29,6 +29,25 @@ BLACKOUT_WINDOWS = [
     (12, 25, 12, 35),
     (13, 55, 14, 5),
 ]
+
+def london_time():
+    now_utc = datetime.now(timezone.utc)
+    month = now_utc.month
+    if 3 < month < 11:
+        offset = 1
+    elif month == 3:
+        offset = 1
+    elif month == 10:
+        offset = 0
+    else:
+        offset = 0
+    london = now_utc + timedelta(hours=offset)
+    suffix = "BST" if offset == 1 else "GMT"
+    return london, suffix
+
+def london_time_str():
+    lt, suffix = london_time()
+    return f"{lt.strftime('%H:%M')} {suffix}"
 
 def send_telegram(message, chat_id=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -67,7 +86,7 @@ def ask_claude(prompt, image_base64=None, media_type="image/jpeg"):
     try:
         r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
         data = r.json()
-        return data["content"][0]["text"]
+        return data["content"][0]["text"].replace("**", "").replace("##", "").replace("# ", "")
     except Exception as e:
         print(f"Claude error: {e}", flush=True)
         return "AI analysis unavailable"
@@ -78,8 +97,8 @@ def get_yahoo_price(pair):
         return None
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="1d", interval="1m")
-        if hist.empty:
+        hist = ticker.history(period="2d", interval="1m")
+        if hist.empty or len(hist) < 2:
             return None
         price = round(float(hist["Close"].iloc[-1]), 5)
         prev_price = round(float(hist["Close"].iloc[-2]), 5)
@@ -121,22 +140,34 @@ def get_twelve_volume(pair):
         return None
 
 def get_session():
-    hour = datetime.now(timezone.utc).hour
+    lt, suffix = london_time()
+    hour = lt.hour
+    minute = lt.minute
     active = []
-    if hour >= 22 or hour < 8:
+    if 0 <= hour < 7:
         active.append("Asia 🌏")
-    if 7 <= hour < 16:
+    if hour == 7:
+        active.append("Frankfurt 🇩🇪")
+    if 8 <= hour < 13:
         active.append("London 🇬🇧")
-    if 13 <= hour < 21:
-        active.append("NY 🇺🇸")
+    if 13 <= hour < 14 or (hour == 14 and minute < 30):
+        active.append("Lunch 😴")
+    if hour > 14 or (hour == 14 and minute >= 30):
+        if hour < 21:
+            active.append("NY 🇺🇸")
     return " + ".join(active) if active else None
 
 def is_blackout():
-    now = datetime.now(timezone.utc)
-    for start_h, start_m, end_h, end_m in BLACKOUT_WINDOWS:
-        start = now.replace(hour=start_h, minute=start_m, second=0)
-        end = now.replace(hour=end_h, minute=end_m, second=0)
-        if start <= now <= end:
+    lt, suffix = london_time()
+    hour = lt.hour
+    minute = lt.minute
+    windows = [
+        (9, 25, 9, 35),
+        (13, 25, 13, 35),
+        (14, 55, 15, 5),
+    ]
+    for start_h, start_m, end_h, end_m in windows:
+        if (hour == start_h and minute >= start_m) or (hour == end_h and minute <= end_m):
             return True
     return False
 
@@ -173,7 +204,7 @@ def check_spikes():
 
             prompt = f"""Institutional forex trader analysing M1 SMT divergence.
 Pair: {pair}, Price: {data['price']}, Volume spike: {ratio:.1f}x, Direction: {direction}, Pips: {pip_move:.1f}, Session: {session}, Correlated ({correlated}): {corr_data['price'] if corr_data else 'unavailable'}.
-4 lines max: what spike means, SMT context, what to look for on M1, confidence HIGH/MEDIUM/LOW."""
+4 lines max. Plain text only no asterisks or hashes: what spike means, SMT context, what to look for on M1, confidence HIGH/MEDIUM/LOW."""
             ai = ask_claude(prompt)
             msg = (
                 f"🚨 <b>VOLUME SPIKE — {pair}</b>\n\n"
@@ -182,20 +213,20 @@ Pair: {pair}, Price: {data['price']}, Volume spike: {ratio:.1f}x, Direction: {di
                 f"💰 Price: {data['price']} {direction}\n"
                 f"📏 Move: {pip_move:.1f} pips"
                 f"{corr_text}\n"
-                f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+                f"🕐 {london_time_str()}\n"
                 f"📍 {session}\n\n"
                 f"🤖 <b>AI READ:</b>\n{ai}"
             )
             send_telegram(msg)
 
         elif pip_move >= 10:
-            prompt = f"""{pair} moved {pip_move:.1f} pips {direction} at {datetime.now(timezone.utc).strftime('%H:%M')} UTC. Session: {session}. Price: {data['price']}. 3 lines: Judas sweep or real momentum? What to watch."""
+            prompt = f"""{pair} moved {pip_move:.1f} pips {direction} at {london_time_str()}. Session: {session}. Price: {data['price']}. 3 lines. Plain text no asterisks: Judas sweep or real momentum? What to watch."""
             ai = ask_claude(prompt)
             msg = (
                 f"💥 <b>FAST MOVE — {pair}</b>\n\n"
                 f"📏 {pip_move:.1f} pips\n"
                 f"💰 Price: {data['price']} {direction}\n"
-                f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+                f"🕐 {london_time_str()}\n"
                 f"📍 {session}\n\n"
                 f"🤖 <b>AI READ:</b>\n{ai}"
             )
@@ -208,6 +239,7 @@ def check_news():
         r = requests.get(url, timeout=10)
         events = r.json()
         now = datetime.now(timezone.utc)
+        lt, suffix = london_time()
         for event in events:
             if event.get("impact") != "High":
                 continue
@@ -223,13 +255,15 @@ def check_news():
             mins_until = (event_time - now).total_seconds() / 60
             if 0 <= mins_until <= 15:
                 last_news_ids.add(event_id)
-                prompt = f"""News in {int(mins_until)} mins: {event.get('title')} for {event.get('currency')}. Forecast: {event.get('forecast', 'N/A')}, Previous: {event.get('previous', 'N/A')}. 3 lines: market impact on EUR/USD and GBP/USD, avoid trading or not, expected move if beats/misses."""
+                offset = 1 if suffix == "BST" else 0
+                event_london = event_time + timedelta(hours=offset)
+                prompt = f"""News in {int(mins_until)} mins: {event.get('title')} for {event.get('currency')}. Forecast: {event.get('forecast', 'N/A')}, Previous: {event.get('previous', 'N/A')}. 3 lines. Plain text no asterisks: market impact on EUR/USD and GBP/USD, avoid trading or not, expected move if beats/misses."""
                 ai = ask_claude(prompt)
                 msg = (
                     f"📰 <b>RED FOLDER — {int(mins_until)} MINS</b>\n\n"
                     f"🏷 {event.get('title')}\n"
                     f"🌍 {event.get('currency')} — High Impact 🔴\n"
-                    f"🕐 {event_time.strftime('%H:%M UTC')}\n"
+                    f"🕐 {event_london.strftime('%H:%M')} {suffix}\n"
                     f"📊 Forecast: {event.get('forecast', 'N/A')} | Prev: {event.get('previous', 'N/A')}\n\n"
                     f"🤖 <b>AI READ:</b>\n{ai}"
                 )
@@ -243,7 +277,8 @@ def check_hourly_bias():
     if not session:
         return
     now = datetime.now(timezone.utc)
-    hour_key = now.strftime("%Y-%m-%d-%H")
+    lt, suffix = london_time()
+    hour_key = lt.strftime("%Y-%m-%d-%H")
     if hour_key in last_hourly:
         return
     last_hourly[hour_key] = True
@@ -263,23 +298,24 @@ def check_hourly_bias():
         for p in prices
     ])
     data_text = " | ".join([f"{p}: {prices[p]['price']} ({'up' if prices[p]['change'] > 0 else 'down'})" for p in prices])
-    prompt = f"""Hourly bias for M1 SMT trader. Time: {now.strftime('%H:%M UTC')}. Session: {session}. Prices: {data_text}. 4 lines: overall bias, strongest/weakest pairs, SMT divergence context EUR/GBP or Gold/Silver, one key thing to watch."""
+    prompt = f"""Hourly bias for M1 SMT trader. Time: {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {data_text}. 4 lines. Plain text no asterisks or hashes: overall bias, strongest/weakest pairs, SMT divergence context EUR/GBP or Gold/Silver, one key thing to watch."""
     ai = ask_claude(prompt)
 
     msg = (
-        f"🕐 <b>HOURLY BIAS — {now.strftime('%H:00 UTC')}</b>\n"
+        f"🕐 <b>HOURLY BIAS — {lt.strftime('%H:00')} {suffix}</b>\n"
         f"📍 {session}\n\n"
         f"{price_summary}\n\n"
         f"🤖 <b>AI READ:</b>\n{ai}\n\n"
-        f"🔄 Next: {(now.hour + 1) % 24:02d}:00 UTC"
+        f"🔄 Next: {(lt.hour + 1) % 24:02d}:00 {suffix}"
     )
     send_telegram(msg)
 
 def send_morning_brief():
+    lt, suffix = london_time()
     now = datetime.now(timezone.utc)
-    if now.hour != 6 or now.minute > 5:
+    if lt.hour != 7 or lt.minute > 5:
         return
-    brief_key = now.strftime("%Y-%m-%d-brief")
+    brief_key = lt.strftime("%Y-%m-%d-brief")
     if brief_key in last_hourly:
         return
     last_hourly[brief_key] = True
@@ -295,12 +331,14 @@ def send_morning_brief():
         r = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=10)
         events = r.json()
         today_events = []
+        offset = 1 if suffix == "BST" else 0
         for e in events:
             if e.get("impact") == "High" and e.get("currency") in ["USD", "EUR", "GBP"]:
                 try:
                     et = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+                    et_london = et + timedelta(hours=offset)
                     if et.date() == now.date():
-                        today_events.append(f"{et.strftime('%H:%M')} UTC — {e.get('currency')} {e.get('title')}")
+                        today_events.append(f"{et_london.strftime('%H:%M')} {suffix} — {e.get('currency')} {e.get('title')}")
                 except:
                     pass
     except:
@@ -310,15 +348,15 @@ def send_morning_brief():
     price_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices]) if prices else "unavailable"
 
     prompt = f"""Professional trading desk analyst writing pre-session brief for M1 SMT divergence forex trader in London.
-Date: {now.strftime('%A %d %b %Y')}. Prices: {price_text}. News today: {news_text}.
-Concise brief: London session bias, key EUR/USD and GBP/USD levels, main risks, one specific London open setup, risk warning if any. Under 150 words. Direct."""
+Date: {lt.strftime('%A %d %b %Y')}. Time: 07:00 {suffix}. Prices: {price_text}. News today: {news_text}.
+Plain text only no asterisks or hashes. Concise brief: London session bias, key EUR/USD and GBP/USD levels, main risks, one specific London open setup at 08:00 {suffix}, risk warning if any. Under 150 words."""
     ai = ask_claude(prompt)
 
     price_lines = "\n".join([f"{'📈' if prices[p]['change'] > 0 else '📉'} <b>{p}</b>: {prices[p]['price']}" for p in prices]) if prices else ""
     news_lines = "\n".join([f"🔴 {e}" for e in today_events]) if today_events else "✅ No high impact news"
 
     msg = (
-        f"🌅 <b>MORNING BRIEF — {now.strftime('%a %d %b')}</b>\n"
+        f"🌅 <b>MORNING BRIEF — {lt.strftime('%a %d %b')} — 07:00 {suffix}</b>\n"
         f"Powered by Fundamentals AI 📊\n\n"
         f"💰 <b>PRICES</b>\n{price_lines}\n\n"
         f"📅 <b>TODAY'S NEWS</b>\n{news_lines}\n\n"
@@ -329,13 +367,18 @@ Concise brief: London session bias, key EUR/USD and GBP/USD levels, main risks, 
 
 def check_session_countdown():
     now = datetime.now(timezone.utc)
+    lt, suffix = london_time()
+
     countdowns = [
-        (6, 45, "🇬🇧 LONDON OPEN", "07:00 UTC"),
-        (12, 45, "🇺🇸 NY OPEN", "13:00 UTC"),
+        (23, 45, "🌏 ASIA OPEN", f"00:00 {suffix}"),
+        (6, 45, "🇩🇪 FRANKFURT OPEN", f"07:00 {suffix}"),
+        (7, 45, "🇬🇧 LONDON OPEN", f"08:00 {suffix}"),
+        (14, 15, "🇺🇸 NY OPEN", f"14:30 {suffix}"),
     ]
+
     for h, m, label, open_time in countdowns:
-        key = f"countdown-{now.strftime('%Y-%m-%d')}-{h}-{m}"
-        if now.hour == h and now.minute >= m and now.minute < m + 5:
+        key = f"countdown-{lt.strftime('%Y-%m-%d')}-{h}-{m}"
+        if lt.hour == h and lt.minute >= m and lt.minute < m + 5:
             if key not in last_hourly:
                 last_hourly[key] = True
                 prices = {}
@@ -345,7 +388,7 @@ def check_session_countdown():
                         prices[pair] = data
                     time.sleep(1)
                 price_lines = "\n".join([f"💰 <b>{p}</b>: {prices[p]['price']}" for p in prices]) if prices else ""
-                prompt = f"""15 minutes to {label} at {open_time}. Prices: {', '.join([f'{p}: {prices[p]["price"]}' for p in prices])}. 3 lines: expected bias at open, where liquidity sits, one key level to watch for sweep."""
+                prompt = f"""15 minutes to {label} at {open_time}. Prices: {', '.join([f'{p}: {prices[p]["price"]}' for p in prices])}. 3 lines. Plain text no asterisks: expected bias at open, where liquidity sits, one key level to watch for sweep."""
                 ai = ask_claude(prompt)
                 msg = (
                     f"⚡ <b>15 MINS TO {label}</b>\n"
@@ -374,7 +417,7 @@ def check_correlation_breakdown():
         if key not in last_hourly:
             last_hourly[key] = True
             weaker = "EUR/USD" if eur_move < gbp_move else "GBP/USD"
-            prompt = f"""SMT context detected. EUR/USD moved {eur_move:.1f} pips, GBP/USD moved {gbp_move:.1f} pips. Divergence: {divergence:.1f} pips. Session: {session}. 3 lines: meaningful SMT context, which pair weaker, what M1 setup to look for."""
+            prompt = f"""SMT context detected. EUR/USD moved {eur_move:.1f} pips, GBP/USD moved {gbp_move:.1f} pips. Divergence: {divergence:.1f} pips. Session: {session}. 3 lines. Plain text no asterisks: meaningful SMT context, which pair weaker, what M1 setup to look for."""
             ai = ask_claude(prompt)
             msg = (
                 f"⚠️ <b>CORRELATION BREAKDOWN</b>\n\n"
@@ -382,7 +425,7 @@ def check_correlation_breakdown():
                 f"GBP/USD: {'+' if gbp_move > 0 else ''}{gbp_move:.1f} pips\n"
                 f"📏 Divergence: {divergence:.1f} pips\n\n"
                 f"💡 <b>{weaker} is weaker</b>\n"
-                f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+                f"🕐 {london_time_str()}\n"
                 f"📍 {session}\n\n"
                 f"🤖 <b>AI READ:</b>\n{ai}"
             )
@@ -411,7 +454,15 @@ def handle_incoming_messages():
                 img_bytes = requests.get(download_url).content
                 img_b64 = base64.b64encode(img_bytes).decode("utf-8")
                 prompt = """Expert SMT divergence forex trader analysing M1 chart.
-Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/order blocks 5. SMT divergence context 6. Entry setup — entry stop target 7. Confidence out of 10. Direct. Max 150 words."""
+Plain text no asterisks or hashes. Provide:
+1. Pair and timeframe
+2. Market structure bullish or bearish
+3. Liquidity sweeps visible
+4. FVGs or order blocks
+5. SMT divergence context if visible
+6. Entry setup — entry stop target
+7. Confidence out of 10
+Direct. Max 150 words."""
                 send_telegram("🤖 Analysing your chart...", chat_id)
                 ai = ask_claude(prompt, img_b64)
                 send_telegram(f"🤖 <b>CHART ANALYSIS</b>\n\n{ai}", chat_id)
@@ -421,19 +472,22 @@ Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/o
 
                 if cmd == "/prices":
                     send_telegram("⏳ Fetching live prices...", chat_id)
-                    prices_msg = "💰 <b>LIVE PRICES</b>\n\n"
+                    lt, suffix = london_time()
+                    prices_msg = f"💰 <b>LIVE PRICES</b>\n🕐 {lt.strftime('%H:%M')} {suffix}\n\n"
                     for pair in PAIRS:
                         data = get_yahoo_price(pair)
                         if data:
                             d = "📈" if data["change"] > 0 else "📉"
                             change_pips = data["change"] * (100 if "XAU" in pair or "XAG" in pair else 10000)
                             prices_msg += f"{d} <b>{pair}</b>: {data['price']} ({'+' if change_pips > 0 else ''}{change_pips:.1f} pips)\n"
+                        else:
+                            prices_msg += f"⚠️ <b>{pair}</b>: unavailable\n"
                         time.sleep(1)
                     send_telegram(prices_msg, chat_id)
 
                 elif cmd == "/bias":
                     send_telegram("⏳ Generating AI bias...", chat_id)
-                    now = datetime.now(timezone.utc)
+                    lt, suffix = london_time()
                     prices = {}
                     for pair in PAIRS:
                         data = get_yahoo_price(pair)
@@ -443,10 +497,10 @@ Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/o
                     session = get_session() or "Off hours"
                     price_summary = "\n".join([f"{'📈' if prices[p]['change'] > 0 else '📉'} <b>{p}</b>: {prices[p]['price']}" for p in prices])
                     data_text = " | ".join([f"{p}: {prices[p]['price']} ({'up' if prices[p]['change'] > 0 else 'down'})" for p in prices])
-                    prompt = f"""Instant bias for M1 SMT trader. Time: {now.strftime('%H:%M UTC')}. Session: {session}. Prices: {data_text}. 4 lines: overall bias, strongest/weakest pairs, SMT divergence context, one key thing to watch."""
+                    prompt = f"""Instant bias for M1 SMT trader. Time: {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {data_text}. 4 lines. Plain text no asterisks or hashes: overall bias, strongest/weakest pairs, SMT divergence context, one key thing to watch."""
                     ai = ask_claude(prompt)
                     msg = (
-                        f"🕐 <b>INSTANT BIAS — {now.strftime('%H:%M UTC')}</b>\n"
+                        f"🕐 <b>INSTANT BIAS — {lt.strftime('%H:%M')} {suffix}</b>\n"
                         f"📍 {session}\n\n"
                         f"{price_summary}\n\n"
                         f"🤖 <b>AI READ:</b>\n{ai}"
@@ -455,18 +509,25 @@ Provide: 1. Pair and timeframe 2. Market structure 3. Liquidity sweeps 4. FVGs/o
 
                 elif cmd == "/brief":
                     send_telegram("⏳ Generating morning brief...", chat_id)
-                    last_hourly.pop(datetime.now(timezone.utc).strftime("%Y-%m-%d-brief"), None)
+                    lt, suffix = london_time()
+                    last_hourly.pop(lt.strftime("%Y-%m-%d-brief"), None)
                     send_morning_brief()
 
                 elif cmd == "/help":
+                    lt, suffix = london_time()
                     send_telegram(
-                        "📊 <b>FUNDAMENTALS BOT COMMANDS</b>\n\n"
-                        "/prices — Live prices all pairs\n"
-                        "/bias — Instant AI bias update\n"
-                        "/brief — Morning brief on demand\n"
-                        "/help — Show commands\n\n"
-                        "📸 Send any chart image for instant AI analysis\n\n"
-                        "🤖 Powered by Fundamentals AI",
+                        f"📊 <b>FUNDAMENTALS BOT COMMANDS</b>\n\n"
+                        f"/prices — Live prices all pairs\n"
+                        f"/bias — Instant AI bias update\n"
+                        f"/brief — Morning brief on demand\n"
+                        f"/help — Show commands\n\n"
+                        f"📸 Send any chart image for instant AI analysis\n\n"
+                        f"⏰ Your sessions ({suffix}):\n"
+                        f"Asia 🌏 00:00 — 07:00\n"
+                        f"Frankfurt 🇩🇪 07:00 — 08:00\n"
+                        f"London 🇬🇧 08:00 — 13:00\n"
+                        f"NY 🇺🇸 14:30 — 21:00\n\n"
+                        f"🤖 Powered by Fundamentals AI",
                         chat_id
                     )
 
@@ -489,19 +550,23 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 time.sleep(5)
 
+lt, suffix = london_time()
 print("Fundamentals Bot starting...", flush=True)
 send_telegram(
-    "📊 <b>FUNDAMENTALS BOT IS LIVE</b>\n\n"
-    "📍 Monitoring: EUR/USD, GBP/USD, XAU/USD, XAG/USD\n"
-    "⏰ Sessions: Asia 🌏 London 🇬🇧 NY 🇺🇸\n"
-    "🤖 AI Analysis: ON\n"
-    "📰 News Alerts: ON\n"
-    "📊 Hourly Bias: ON\n"
-    "🌅 Morning Brief: 07:30 BST daily\n"
-    "📸 Chart Analysis: Send any image\n"
-    "💰 Prices: Yahoo Finance\n"
-    "📊 Volume Spikes: Twelve Data\n\n"
-    "Commands: /prices /bias /brief /help"
+    f"📊 <b>FUNDAMENTALS BOT IS LIVE</b>\n\n"
+    f"📍 Pairs: EUR/USD, GBP/USD, XAU/USD, XAG/USD\n\n"
+    f"⏰ Sessions ({suffix}):\n"
+    f"Asia 🌏 00:00 — 07:00\n"
+    f"Frankfurt 🇩🇪 07:00 — 08:00\n"
+    f"London 🇬🇧 08:00 — 13:00\n"
+    f"NY 🇺🇸 14:30 — 21:00\n\n"
+    f"🤖 AI Analysis: ON\n"
+    f"📰 News Alerts: ON\n"
+    f"📊 Hourly Bias: ON\n"
+    f"🌅 Morning Brief: 07:00 {suffix}\n"
+    f"📸 Chart Analysis: ON\n"
+    f"🕐 Current time: {lt.strftime('%H:%M')} {suffix}\n\n"
+    f"Commands: /prices /bias /brief /help"
 )
 
 def message_loop():
