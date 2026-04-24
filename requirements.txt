@@ -1,3 +1,5 @@
 requests
 yfinance
 beautifulsoup4
+lxml
+anthropic
