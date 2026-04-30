@@ -33,7 +33,6 @@ YAHOO_SYMBOLS = {
 SPIKE_MULTIPLIER = 3.0
 last_hourly = {}
 last_news_ids = set()
-last_ff_headlines = set()
 last_update_id = 0
 conversation_history = {}
 asia_range = {"high": None, "low": None, "recorded": False}
@@ -69,7 +68,7 @@ Format:
 - Auto alerts: one short divider line at top. max 4 lines after it.
 - Pair names and price levels can be uppercase: EUR/USD, 1.1748
 - No asterisks. No hashes. No markdown.
-- Setup grade A/B/C and kill score /10 on charts — keep it brief."""
+- Setup grade A/B/C and kill score /10 on charts only."""
 
 def london_time():
     now_utc = datetime.now(timezone.utc)
@@ -335,9 +334,7 @@ def check_smart_money_narrative():
     price_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices])
     dxy_trend = "dropping" if dxy_data["change"] < 0 else "rising"
 
-    prompt = f"""Smart money flow context. Time: {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {price_text}. DXY {dxy_data['price']} {dxy_trend}. EUR H1:{mtf_eur.get('H1','?')} M15:{mtf_eur.get('M15','?')} GBP H1:{mtf_gbp.get('H1','?')} M15:{mtf_gbp.get('M15','?')}. Liquidity: {get_liquidity_context()}.
-
-3 lines max. Plain text like a text message. What institutional money is likely doing right now based on DXY and price location. What the narrative is. What to watch. No hype."""
+    prompt = f"""Smart money flow context. Time: {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {price_text}. DXY {dxy_data['price']} {dxy_trend}. EUR H1:{mtf_eur.get('H1','?')} M15:{mtf_eur.get('M15','?')} GBP H1:{mtf_gbp.get('H1','?')} M15:{mtf_gbp.get('M15','?')}. Liquidity: {get_liquidity_context()}. 3 lines plain text like a text message. What institutional money is likely doing. What the narrative is. What to watch. No hype. Address Joshua and Mascu."""
 
     ai = ask_claude(prompt)
     msg = f"━━━━━━━━━━━━━━━━━━\nsmarts · {lt.strftime('%H:%M')} {suffix}\n{ai}"
@@ -347,7 +344,7 @@ def check_confluence_zones():
     if is_weekend() or is_blackout():
         return
     session = get_session()
-    if not session:
+    if not session or "lunch" in session or "Asia" in session:
         return
 
     eur_data = get_yahoo_price("EUR/USD")
@@ -378,7 +375,7 @@ def check_confluence_zones():
         if key not in last_hourly:
             last_hourly[key] = True
             levels_text = " · ".join([f"{k} {v}" for k, v in nearby.items()])
-            prompt = f"""EUR/USD at {price} near a confluence of levels: {levels_text}. Session: {session}. 3 lines plain text: what this zone means, what institutions likely do here, what M1 signal to wait for. No hype. Address Joshua and Mascu."""
+            prompt = f"""EUR/USD at {price} near confluence of levels: {levels_text}. Session: {session}. 3 lines plain text: what this zone means, what institutions likely do here, what M1 signal to wait for. No hype. Address Joshua and Mascu."""
             ai = ask_claude(prompt)
             levels_display = " · ".join([f"{k} {v}" for k, v in nearby.items()])
             msg = f"━━━━━━━━━━━━━━━━━━\nconfluence · EUR/USD {price}\n{levels_display}\n{ai}"
@@ -403,7 +400,7 @@ def check_london_ny_handoff():
     price_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices])
     asia_text = f"Asia H:{asia_range['high']} L:{asia_range['low']}" if asia_range["high"] else ""
 
-    prompt = f"""London just closed, NY opens in 30 mins. Prices: {price_text}. DXY: {dxy_data['price'] if dxy_data else 'N/A'}. {asia_text}. Liquidity: {get_liquidity_context()}. 4 lines plain text: what London did, what liquidity is left, what NY is likely to target, one setup to watch at 14:30. Talk to Joshua and Mascu. No hype."""
+    prompt = f"""London just closed, NY opens in 30 mins. Prices: {price_text}. DXY: {dxy_data['price'] if dxy_data else 'N/A'}. {asia_text}. Liquidity: {get_liquidity_context()}. 4 lines plain text: what London did, what liquidity is left, what NY is likely to target, one setup to watch at 14:30. Address Joshua and Mascu."""
 
     ai = ask_claude(prompt)
     price_line = " · ".join([f"{'🟢' if prices[p]['change'] > 0 else '🔴'} {p.split('/')[0]} {prices[p]['price']}" for p in prices])
@@ -425,16 +422,10 @@ def check_cot_report():
     prices = get_all_prices()
     price_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices]) if prices else "unavailable"
 
-    prompt = f"""Friday flow summary for Joshua and Mascu. Prices: {price_text}. Data trends — {surprise_usd} · {surprise_eur} · {surprise_gbp}. 4 lines plain text: institutional bias based on recent data, which pairs to favour next week, key thing to watch Monday. No hype."""
+    prompt = f"""Friday flow summary for Joshua and Mascu. Prices: {price_text}. Data trends — {surprise_usd} · {surprise_eur} · {surprise_gbp}. 4 lines plain text: institutional bias based on recent data, which pairs to favour next week, key thing to watch Monday."""
 
     ai = ask_claude(prompt)
-    lines = []
-    if surprise_usd:
-        lines.append(surprise_usd)
-    if surprise_eur:
-        lines.append(surprise_eur)
-    if surprise_gbp:
-        lines.append(surprise_gbp)
+    lines = [l for l in [surprise_usd, surprise_eur, surprise_gbp] if l]
     msg = f"━━━━━━━━━━━━━━━━━━\nfriday flow · {lt.strftime('%d %b')}\n" + "\n".join(lines) + f"\n{ai}"
     send_telegram(msg)
 
@@ -480,7 +471,7 @@ def check_order_flow_context():
             correlated = "GBP/USD" if pair == "EUR/USD" else "EUR/USD" if pair == "GBP/USD" else "XAG/USD" if pair == "XAU/USD" else "XAU/USD"
             corr_data = all_data.get(correlated)
 
-            prompt = f"""Volume spike on {pair}. Price {price} moving {direction} {pip_move:.1f} pips. Volume {ratio:.1f}x normal. Location: {location}. Session: {session}. {correlated}: {corr_data['price'] if corr_data else 'N/A'}. Liquidity: {liq}. 3 lines plain text no hype: who is likely behind this move, SMT context with {correlated}, M1 setup and kill score. Talk to Joshua and Mascu."""
+            prompt = f"""Volume spike on {pair}. Price {price} moving {direction} {pip_move:.1f} pips. Volume {ratio:.1f}x normal. Location: {location}. Session: {session}. {correlated}: {corr_data['price'] if corr_data else 'N/A'}. Liquidity: {liq}. 3 lines plain text: who is likely behind this, SMT context with {correlated}, M1 setup and kill score. Address Joshua and Mascu."""
 
             ai = ask_claude(prompt)
             corr_line = f"{correlated} {corr_data['price']}" if corr_data else ""
@@ -493,7 +484,7 @@ def check_order_flow_context():
             send_telegram(msg)
 
         elif pip_move >= 10:
-            prompt = f"""{pair} moved {pip_move:.1f}p {direction} at {lt.strftime('%H:%M')} {suffix}. Price: {data['price']}. Session: {session}. Liquidity: {get_liquidity_context()}. 3 lines plain text: Judas or momentum, SMT context, what to watch."""
+            prompt = f"""{pair} moved {pip_move:.1f}p {direction} at {lt.strftime('%H:%M')} {suffix}. Price: {data['price']}. Session: {session}. Liquidity: {get_liquidity_context()}. 2 lines plain text: Judas or momentum, what to watch on M1."""
             ai = ask_claude(prompt)
             msg = f"━━━━━━━━━━━━━━━━━━\n{pair} · {pip_move:.1f}p {direction} · {data['price']}\n{ai}"
             send_telegram(msg)
@@ -560,7 +551,7 @@ def check_news_results():
                 gbp_data = get_yahoo_price("GBP/USD")
                 price_line = f"EUR/USD {eur_data['price']} · GBP/USD {gbp_data['price']}" if eur_data and gbp_data else ""
 
-                prompt = f"""News result: {event.get('title')} for {currency}. actual {actual} vs forecast {forecast}. {result_word}. {impact}. {surprise_context}. {price_line}. Liquidity: {get_liquidity_context()}. 3 lines plain text: what happened, M1 reaction to expect, trade now or wait. No hype. Talk to Joshua and Mascu."""
+                prompt = f"""News result: {event.get('title')} for {currency}. actual {actual} vs forecast {forecast}. {result_word}. {impact}. {surprise_context}. {price_line}. Liquidity: {get_liquidity_context()}. 3 lines plain text: what happened, M1 reaction to expect, trade now or wait. Address Joshua and Mascu."""
 
                 ai = ask_claude(prompt)
                 result_icon = "🟢" if beat else "🔴" if beat is False else "⚪"
@@ -592,7 +583,7 @@ def send_news_debrief(title, currency, beat, impact):
     gbp_data = get_yahoo_price("GBP/USD")
     price_line = f"EUR/USD {eur_data['price']} · GBP/USD {gbp_data['price']}" if eur_data and gbp_data else ""
 
-    prompt = f"""30 mins after {title} for {currency}. Expected: {impact}. Current: {price_line}. Liquidity: {get_liquidity_context()}. 3 lines plain text: did price follow the expected direction or reverse, where it is now relative to key levels, is there still a setup or done. Talk to Joshua and Mascu."""
+    prompt = f"""30 mins after {title} for {currency}. Expected: {impact}. Current: {price_line}. Liquidity: {get_liquidity_context()}. 3 lines plain text: did price follow expected direction or reverse, where it is now relative to key levels, still a setup or done. Address Joshua and Mascu."""
 
     ai = ask_claude(prompt)
     msg = f"━━━━━━━━━━━━━━━━━━\n{title} · 30 mins later\n{price_line}\n{ai}"
@@ -631,42 +622,13 @@ def check_accumulation():
                 liq = get_liquidity_context()
                 location = "discount" if asia_range["low"] and price <= asia_range["low"] + 0.0010 else "premium" if asia_range["high"] and price >= asia_range["high"] - 0.0010 else "mid range"
 
-                prompt = f"""{pair} has been ranging in {price_range:.1f} pips for {int(time_elapsed)} mins. Price: {price}. Location: {location}. Session: {session}. Liquidity: {liq}. 3 lines plain text: this looks like accumulation, what direction the breakout is more likely, what M1 signal to wait for. Address Joshua and Mascu."""
+                prompt = f"""{pair} ranging {price_range:.1f} pips for {int(time_elapsed)} mins. Price: {price}. Location: {location}. Session: {session}. Liquidity: {liq}. 3 lines plain text: looks like accumulation, which direction breakout more likely, what M1 signal to wait for. Address Joshua and Mascu."""
 
                 ai = ask_claude(prompt)
-                msg = f"━━━━━━━━━━━━━━━━━━\n{pair} tight range · {price_range:.1f}p · {int(time_elapsed)}mins · {location}\n{ai}"
+                msg = f"━━━━━━━━━━━━━━━━━━\n{pair} tight · {price_range:.1f}p range · {int(time_elapsed)}mins · {location}\n{ai}"
                 send_telegram(msg)
         else:
             tracker["alerted"] = False
-
-def check_liquidity_touch():
-    if is_weekend() or is_blackout():
-        return
-    session = get_session()
-    if not session:
-        return
-    eur_data = get_yahoo_price("EUR/USD")
-    if not eur_data:
-        return
-    price = eur_data["price"]
-    lt, suffix = london_time()
-    levels = {
-        "PDH": liquidity_levels["pdh"],
-        "PDL": liquidity_levels["pdl"],
-        "PWH": liquidity_levels["pwh"],
-        "PWL": liquidity_levels["pwl"],
-    }
-    for label, level in levels.items():
-        if not level:
-            continue
-        if abs(price - level) * 10000 <= 3:
-            key = f"liq-{label}-{lt.strftime('%Y-%m-%d-%H-%M')}"
-            if key not in last_hourly:
-                last_hourly[key] = True
-                prompt = f"""EUR/USD just tagged {label} at {level}. Price: {price}. Session: {session}. 3 lines plain text: sweep or test, expected reaction, M1 setup. Address Joshua and Mascu."""
-                ai = ask_claude(prompt)
-                msg = f"━━━━━━━━━━━━━━━━━━\nEUR/USD tagged {label} {level}\n{ai}"
-                send_telegram(msg)
 
 def track_asia_range():
     global asia_range
@@ -686,7 +648,7 @@ def track_asia_range():
     if hour == 7 and not asia_range["recorded"] and asia_range["high"] and asia_range["low"]:
         asia_range["recorded"] = True
         rng = round((asia_range["high"] - asia_range["low"]) * 10000, 1)
-        prompt = f"""Asia just closed. EUR/USD range high {asia_range['high']} low {asia_range['low']} — {rng} pips. Liquidity: {get_liquidity_context()}. 3 lines plain text: which side has more liquidity, which level London likely sweeps first at 08:00, overall London bias. Talk to Joshua and Mascu."""
+        prompt = f"""Asia just closed. EUR/USD range high {asia_range['high']} low {asia_range['low']} — {rng} pips. Liquidity: {get_liquidity_context()}. 3 lines plain text: which side has more liquidity, which level London likely sweeps first at 08:00, London bias. Address Joshua and Mascu."""
         ai = ask_claude(prompt)
         msg = f"━━━━━━━━━━━━━━━━━━\nAsia done · H:{asia_range['high']} L:{asia_range['low']} · {rng}p\n{ai}"
         send_telegram(msg)
@@ -714,7 +676,7 @@ def check_dxy():
                 last_hourly[key] = True
                 direction = "dropping" if change_pct < 0 else "rising"
                 impact = "EUR/GBP bullish · gold up" if change_pct < 0 else "EUR/GBP bearish · gold down"
-                prompt = f"""DXY moved {change_pct:.2f}% — dollar {direction}. DXY: {current_price}. Session: {session}. 2 lines plain text: impact on EUR/USD GBP/USD, what M1 reaction to expect. Address Joshua and Mascu."""
+                prompt = f"""DXY moved {change_pct:.2f}% — dollar {direction}. DXY: {current_price}. Session: {session}. 2 lines plain text: impact on EUR/USD GBP/USD, M1 reaction to expect. Address Joshua and Mascu."""
                 ai = ask_claude(prompt)
                 msg = f"━━━━━━━━━━━━━━━━━━\nDXY {current_price} · {'+' if change_pct > 0 else ''}{change_pct:.2f}% · dollar {direction}\n{impact}\n{ai}"
                 send_telegram(msg)
@@ -773,7 +735,7 @@ def send_session_summary():
                 return
             price_line = " · ".join([f"{'🟢' if prices[p]['change'] > 0 else '🔴'} {p.split('/')[0]} {prices[p]['price']}" for p in prices])
             data_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices])
-            prompt = f"""{label} session closed. Prices: {data_text}. Liquidity: {get_liquidity_context()}. 3 lines plain text: how session went, biggest mover, bias for next session. Talk to Joshua and Mascu."""
+            prompt = f"""{label} session closed. Prices: {data_text}. Liquidity: {get_liquidity_context()}. 3 lines plain text: how session went, biggest mover, bias for next session. Address Joshua and Mascu."""
             ai = ask_claude(prompt)
             msg = f"━━━━━━━━━━━━━━━━━━\n{label} done · {lt.strftime('%H:%M')} {suffix}\n{price_line}\n{ai}"
             send_telegram(msg)
@@ -804,7 +766,7 @@ def send_weekly_outlook():
         week_events = []
     price_text = " | ".join([f"{p}: {prices[p]['price']}" for p in prices]) if prices else "unavailable"
     news_text = "\n".join(week_events[:10]) if week_events else "nothing major"
-    prompt = f"""Weekly outlook {lt.strftime('%d %b %Y')}. Prices: {price_text}. Key events: {news_text}. 4 lines plain text: weekly bias EUR/USD GBP/USD, key levels, most important event, main setup to watch. Talk to Joshua and Mascu."""
+    prompt = f"""Weekly outlook {lt.strftime('%d %b %Y')}. Prices: {price_text}. Key events: {news_text}. 4 lines plain text: weekly bias EUR/USD GBP/USD, key levels, most important event, main setup to watch. Address Joshua and Mascu."""
     ai = ask_claude(prompt)
     price_line = " · ".join([f"{'🟢' if prices[p]['change'] > 0 else '🔴'} {p.split('/')[0]} {prices[p]['price']}" for p in prices]) if prices else ""
     news_lines = "\n".join([f"🔴 {e}" for e in week_events]) if week_events else "nothing major this week"
@@ -845,7 +807,7 @@ def check_news():
                 offset = 1 if suffix == "BST" else 0
                 event_london = event_time + timedelta(hours=offset)
                 surprise_ctx = get_surprise_history_text(event.get("currency", "USD"))
-                prompt = f"""Red folder in {int(mins_until)} mins: {event.get('title')} for {event.get('currency')}. forecast {event.get('forecast', 'N/A')} prev {event.get('previous', 'N/A')}. {surprise_ctx}. 3 lines plain text: what this event does to EUR/USD GBP/USD, beat vs miss outcome, trade or sit out. No hype. Address Joshua and Mascu."""
+                prompt = f"""Red folder in {int(mins_until)} mins: {event.get('title')} for {event.get('currency')}. forecast {event.get('forecast', 'N/A')} prev {event.get('previous', 'N/A')}. {surprise_ctx}. 3 lines plain text: what this does to EUR/USD GBP/USD, beat vs miss outcome, trade or sit out. Address Joshua and Mascu."""
                 ai = ask_claude(prompt)
                 msg = (
                     f"━━━━━━━━━━━━━━━━━━\n"
@@ -883,7 +845,7 @@ def check_hourly_bias():
     dxy_line = f"DXY {dxy_data['price']} {'📉' if dxy_data['change'] < 0 else '📈'}" if dxy_data else ""
     data_text = " | ".join([f"{p}: {prices[p]['price']} ({'up' if prices[p]['change'] > 0 else 'down'})" for p in prices])
 
-    prompt = f"""Hourly bias {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {data_text}. MTF: {mtf_line}. DXY: {dxy_data['price'] if dxy_data else 'N/A'}. Liquidity: {get_liquidity_context()}. 3 lines plain text no hype: overall bias and strongest/weakest pair, SMT context if any, one thing to watch this hour. Address Joshua and Mascu."""
+    prompt = f"""Hourly bias {lt.strftime('%H:%M')} {suffix}. Session: {session}. Prices: {data_text}. MTF: {mtf_line}. DXY: {dxy_data['price'] if dxy_data else 'N/A'}. Liquidity: {get_liquidity_context()}. 3 lines plain text: overall bias and strongest/weakest pair, SMT context if any, one thing to watch this hour. Address Joshua and Mascu."""
     ai = ask_claude(prompt)
 
     msg = (
@@ -1017,17 +979,16 @@ def send_guide(chat_id):
         "beat = that pair pumps\n"
         "miss = that pair drops\n\n"
         "reading the numbers:\n"
-        "F = forecast (expected)\n"
-        "P = previous (last time)\n"
+        "F = forecast (what was expected)\n"
+        "P = previous (last time it printed)\n"
         "actual > forecast = beat 🟢\n"
         "actual < forecast = miss 🔴\n\n"
         "surprise history ✅❌⚪:\n"
-        "tracks last 5 releases\n"
-        "lots of ❌ = currency weakening trend\n"
-        "lots of ✅ = currency strengthening trend\n\n"
+        "tracks last 5 releases for that currency\n"
+        "lots of ❌ = data trend weakening\n"
+        "lots of ✅ = data trend strengthening\n\n"
         "don't trade the spike\n"
         "wait 5-15 mins for it to exhaust\n"
-        "real setup comes after\n"
         "ponk ponk sends a debrief 30 mins later"
     )
     send_telegram(guide, chat_id)
@@ -1078,11 +1039,11 @@ def handle_natural_message(text, chat_id, from_id=None):
     group_context = f"group chat — {other_trader} is also here." if is_group and other_trader else ""
 
     if is_trade_entry:
-        prompt = f"""{name_context} {group_context} they just said: "{text}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. {price_context}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 4 lines max: react to the entry, quick SMC read, setup grade A/B/C, kill score /10, one line of real psychology support."""
+        prompt = f"""{name_context} {group_context} they just said: "{text}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. {price_context}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 4 lines max: react to the entry, quick SMC read, setup grade A/B/C, kill score /10, one line real psychology."""
     elif is_psychology:
         prompt = f"""{name_context} {group_context} they said: "{text}". respond like a trading mate texting — no dividers, 3 lines: honest support, real advice, keep it human."""
     else:
-        prompt = f"""{name_context} {group_context} they say: "{text}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. {price_context}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 2-3 lines max. use their name. answer directly. if it's a one word message like hello just say hey back and ask what they're watching."""
+        prompt = f"""{name_context} {group_context} they say: "{text}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. {price_context}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 2-3 lines max. use their name. answer directly. if it's a greeting just say hey back and ask what they're watching."""
 
     ai = ask_claude(prompt, use_history=True, chat_id=chat_id)
     send_telegram(ai, chat_id)
@@ -1121,7 +1082,7 @@ def handle_incoming_messages():
                 group_ctx = f"group chat — {other_trader} is watching." if is_group and other_trader else ""
 
                 if is_trade:
-                    prompt = f"""{name_ctx} {group_ctx} they sent a chart and said: "{caption}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 6 lines max: react to entry, SMC analysis — structure sweeps FVGs OBs SMT if two charts, entry SL TP with prices, setup grade A/B/C, kill score /10, one line of real psychology."""
+                    prompt = f"""{name_ctx} {group_ctx} they sent a chart and said: "{caption}". time: {lt.strftime('%H:%M')} {suffix}. session: {session}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 6 lines max: react to entry, SMC analysis — structure sweeps FVGs OBs SMT if two charts, entry SL TP with prices, setup grade A/B/C, kill score /10, one line psychology."""
                 else:
                     prompt = f"""{name_ctx} {group_ctx} they sent a chart{' saying: ' + caption if caption else ''}. time: {lt.strftime('%H:%M')} {suffix}. session: {session}. liquidity: {get_liquidity_context()}. respond like a trading mate texting — no dividers, 6 lines max: quick reaction, pair and timeframe, structure BOS/CHOCH, sweeps of equal highs/lows PDH/PDL Asia range, FVGs and OBs with prices, SMT if two charts, entry SL TP, setup grade A/B/C, kill score /10."""
 
@@ -1267,7 +1228,6 @@ while True:
         check_london_killzone()
         send_session_summary()
         update_liquidity_levels()
-        check_liquidity_touch()
         check_confluence_zones()
         check_accumulation()
         check_london_ny_handoff()
